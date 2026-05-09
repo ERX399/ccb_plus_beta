@@ -1,4 +1,29 @@
 {
+  "is_log": {
+    "description": "完整日志记录",
+    "type": "bool",
+    "default": false,
+    "hint": "是否独立保留每一条ccb记录，包括双方与注入量。"
+  },
+  "display_settings": {
+    "description": "显示设置",
+    "type": "object",
+    "hint": "点击展开配置消息展示方式。",
+    "items": {
+      "show_avatar": {
+        "description": "是否显示目标头像",
+        "type": "bool",
+        "default": true,
+        "hint": "关闭后，CCB结果不再附带目标头像图片。"
+      },
+      "use_forward_message": {
+        "description": "是否使用合并转发发送结果",
+        "type": "bool",
+        "default": false,
+        "hint": "开启后，CCB结果会尝试以合并转发形式发送；不支持的平台会自动回退普通消息。"
+      }
+    }
+  },
   "yw_window": {
     "description": "触发赛博阳痿的窗口时间（秒）",
     "type": "int",
@@ -113,11 +138,5 @@
         "hint": "开启后，AstrBot管理员不会触发频率养胃和随机养胃，也不会被养胃状态拦截。"
       }
     }
-  },
-  "is_log": {
-    "description": "完整日志记录",
-    "type": "bool",
-    "default": false,
-    "hint": "是否独立保留每一条ccb记录，包括双方与注入量。"
   }
 }
