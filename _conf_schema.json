@@ -66,15 +66,15 @@
     "hint": "是否独立保留每一条ccb记录，包括双方与注入量。"
   },
   "admin_extra_crit_enabled": {
-    "description": "是否允许管理员额外暴击率",
+    "description": "是否启用管理员额外暴击率",
     "type": "bool",
     "default": false,
-    "hint": "开启后，管理员可用 ccbadmincrit 切换额外暴击率状态。"
+    "hint": "开启后，AstrBot管理员自动获得额外暴击率，无需指令开关。"
   },
   "admin_extra_crit_bonus": {
     "description": "管理员额外暴击率",
     "type": "float",
     "default": 0.3,
-    "hint": "管理员开启额外暴击后，在 crit_prob 基础上额外增加的暴击概率，默认0.3。"
+    "hint": "管理员在 crit_prob 基础上额外增加的暴击概率，默认0.3。"
   }
 }
