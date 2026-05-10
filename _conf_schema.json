@@ -110,7 +110,14 @@
             "type": "string",
             "default": "CCB PLUS Beta",
             "hint": "合并转发消息中每个节点显示的外显名称"
+          },
+          "top_limit": {
+            "description": "排行榜默认显示数量",
+            "type": "int",
+            "default": 10,
+            "hint": "所有 TOP 榜默认显示条数，支持 1~100；命令也可追加数量，如 /ccbtop 20。超过 10 条会强制使用合并转发"
           }
+
         }
       },
       "super_crit_enabled": {
@@ -132,12 +139,20 @@
         "hint": "开启后，AstrBot管理员自动获得额外暴击率，无需指令开关"
       },
       "extra_crit_bonus": {
+
         "description": "管理员额外暴击率",
         "type": "float",
         "default": 0.3,
         "hint": "管理员在普通暴击概率基础上额外增加的暴击概率，最终概率限制在0~1"
       },
+      "min_volume": {
+        "description": "管理员注入量保底值",
+        "type": "float",
+        "default": 0,
+        "hint": "管理员发起 /ccb 时的最终注入量最低值，低于该值会自动抬到该值；0 表示关闭"
+      },
       "exempt_yw": {
+
         "description": "管理员豁免限制",
         "type": "bool",
         "default": false,
