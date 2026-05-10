@@ -59,7 +59,16 @@ class DailyGroupLimiter:
     def get_user_count(self, group_id: str, user_id: str) -> int:
         data = self._read()
         today = self._today()
-        return int(data.get(today, {}).get(str(group_id), {}).get(str(user_id), 0))
+        try:
+            today_data = data.get(today, {})
+            if not isinstance(today_data, dict):
+                today_data = {}
+            group_data = today_data.get(str(group_id), {})
+            if not isinstance(group_data, dict):
+                group_data = {}
+            return int(group_data.get(str(user_id), 0))
+        except Exception:
+            return 0
 
     def can_use(self, group_id: str, user_id: str, limit: int) -> tuple[bool, int]:
         if limit <= 0:
@@ -73,9 +82,20 @@ class DailyGroupLimiter:
         data = self._read()
         today = self._today()
         data.setdefault(today, {}).setdefault(str(group_id), {})
-        data[today][str(group_id)][str(user_id)] = int(data[today][str(group_id)].get(str(user_id), 0)) + 1
-        self._write(data)
-        return data[today][str(group_id)][str(user_id)]
+        
+        # 确保数据是字典类型
+        try:
+            group_data = data[today][str(group_id)]
+            if not isinstance(group_data, dict):
+                group_data = {}
+                data[today][str(group_id)] = group_data
+            count = int(group_data.get(str(user_id), 0)) + 1
+            group_data[str(user_id)] = count
+            self._write(data)
+            return count
+        except Exception as e:
+            logger.warning(f"increase daily limit error: {e}")
+            return 0
 @register("ccb_plus_beta", "ERX399", "和群友赛博sex的插件PLUS Beta：群聊白名单、群单独限制、默认白名单保护、管理清理、防CCB、显示设置、管理员折叠配置", "1.3.4-beta")
 class ccb(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -347,13 +367,14 @@ class ccb(Star):
             if records:
                 return records, actor_actions
         all_data = self.read_data()
-        # 兼容群号 key 为字符串或整数
+        # 兼容群号 key 为字符串或整数，并确保类型正确
         group_data = all_data.get(str(group_id), [])
         if not group_data:
             try:
                 group_data = all_data.get(int(group_id), [])
             except (ValueError, TypeError):
                 pass
+        # 确保返回的是列表类型
         return (group_data if isinstance(group_data, list) else []), {}
 
     def _build_log_extra(self, group_data: list, target_user_id: str, executor_id: str, crit: bool = False) -> dict:
@@ -366,7 +387,12 @@ class ccb(Star):
         executor_target_count = int(executor_info.get("count", 0) or 0)
         for rec in group_data:
             try:
-                executor_total_count += int(((rec.get(a4, {}) or {}).get(executor_id, {}) or {}).get("count", 0) or 0)
+                ccb_by = rec.get(a4, {}) or {}
+                if isinstance(ccb_by, dict):
+                    actor_info = ccb_by.get(executor_id, {}) or {}
+                    if isinstance(actor_info, dict):
+                        count = actor_info.get("count", 0) or 0
+                        executor_total_count += int(count)
             except Exception:
                 pass
 
@@ -560,8 +586,21 @@ class ccb(Star):
                             )
                             nickname = stranger_info.get("nick", nickname)
 
-                        item[a2] = int(item.get(a2, 0)) + 1
-                        item[a3] = round(float(item.get(a3, 0)) + V, 2)
+                        try:
+                            current_num = item.get(a2, 0)
+                            if not isinstance(current_num, (int, float)):
+                                current_num = 0
+                            item[a2] = int(current_num) + 1
+                        except Exception:
+                            item[a2] = 1
+                        
+                        try:
+                            current_vol = item.get(a3, 0)
+                            if not isinstance(current_vol, (int, float)):
+                                current_vol = 0
+                            item[a3] = round(float(current_vol) + V, 2)
+                        except Exception:
+                            item[a3] = round(V, 2)
 
                         ccb_by = item.get(a4, {}) or {}
                         if send_id in ccb_by:
@@ -579,10 +618,21 @@ class ccb(Star):
                                 prev_max = 0.0
                         if prev_max == 0.0:
                             try:
-                                total_vol = float(item.get(a3, 0))
-                                total_num = int(item.get(a2, 0))
+                                current_vol = item.get(a3, 0)
+                                current_num = item.get(a2, 0)
+                                
+                                if not isinstance(current_vol, (int, float)):
+                                    current_vol = 0
+                                if not isinstance(current_num, (int, float)):
+                                    current_num = 0
+                                
+                                total_vol = float(current_vol)
+                                total_num = int(current_num)
+                                
                                 if total_num > 0:
                                     prev_max = round(total_vol / total_num, 2)
+                                else:
+                                    prev_max = 0.0
                             except Exception:
                                 prev_max = 0.0
 
@@ -713,7 +763,7 @@ class ccb(Star):
             yield event.plain_result("当前群暂无ccb记录")
             return
 
-        top5 = sorted(group_data, key=lambda x: int(x.get(a2, 0)), reverse=True)[:5]
+        top5 = sorted(group_data, key=lambda x: int(x.get(a2, 0)) if isinstance(x.get(a2, 0), (int, float)) else 0, reverse=True)[:5]
         msg = "被ccb排行榜 TOP5：\n"
         for i, r in enumerate(top5, 1):
             uid = r[a1]
@@ -741,7 +791,7 @@ class ccb(Star):
             yield event.plain_result("当前群暂无ccb记录")
             return
 
-        top5 = sorted(group_data, key=lambda x: float(x.get(a3, 0)), reverse=True)[:5]
+        top5 = sorted(group_data, key=lambda x: float(x.get(a3, 0)) if isinstance(x.get(a3, 0), (int, float)) else 0.0, reverse=True)[:5]
         msg = "被注入量排行榜 TOP5：\n"
         for i, r in enumerate(top5, 1):
             uid = r[a1]
@@ -774,17 +824,35 @@ class ccb(Star):
             yield event.plain_result("该用户暂无ccb记录")
             return
 
-        total_num = int(record.get(a2, 0))
-        total_vol = float(record.get(a3, 0))
+        try:
+            current_num = record.get(a2, 0)
+            if not isinstance(current_num, (int, float)):
+                current_num = 0
+            total_num = int(current_num)
+        except Exception:
+            total_num = 0
+            
+        try:
+            current_vol = record.get(a3, 0)
+            if not isinstance(current_vol, (int, float)):
+                current_vol = 0
+            total_vol = float(current_vol)
+        except Exception:
+            total_vol = 0.0
 
         raw_max = record.get(a5, None)
         max_val = 0.0
         try:
             if raw_max is not None:
-                max_val = float(raw_max)
+                if isinstance(raw_max, (int, float)):
+                    max_val = float(raw_max)
+                else:
+                    max_val = 0.0
             else:
                 if total_num > 0:
                     max_val = round(total_vol / total_num, 2)
+                else:
+                    max_val = 0.0
         except Exception:
             max_val = 0.0
 
@@ -799,6 +867,8 @@ class ccb(Star):
             cb_total = 0
 
         ccb_by = record.get(a4, {})
+        if not isinstance(ccb_by, dict):
+            ccb_by = {}
         first_actor = None
         for actor_id, info in ccb_by.items():
             if info.get("first"):
@@ -848,12 +918,26 @@ class ccb(Star):
             max_val = 0.0
             try:
                 if raw_max is not None:
-                    max_val = float(raw_max)
+                    if isinstance(raw_max, (int, float)):
+                        max_val = float(raw_max)
+                    else:
+                        max_val = 0.0
                 else:
-                    total_vol = float(r.get(a3, 0))
-                    total_num = int(r.get(a2, 0))
+                    current_vol = r.get(a3, 0)
+                    current_num = r.get(a2, 0)
+                    
+                    if not isinstance(current_vol, (int, float)):
+                        current_vol = 0
+                    if not isinstance(current_num, (int, float)):
+                        current_num = 0
+                        
+                    total_vol = float(current_vol)
+                    total_num = int(current_num)
+                    
                     if total_num > 0:
                         max_val = round(total_vol / total_num, 2)
+                    else:
+                        max_val = 0.0
             except Exception:
                 max_val = 0.0
             entries.append((r, float(max_val)))
@@ -927,8 +1011,21 @@ class ccb(Star):
         ranking = []
         for record in group_data:
             uid = record.get(a1)
-            num = int(record.get(a2, 0))
-            vol = float(record.get(a3, 0))
+            try:
+                current_num = record.get(a2, 0)
+                if not isinstance(current_num, (int, float)):
+                    current_num = 0
+                num = int(current_num)
+            except Exception:
+                num = 0
+            
+            try:
+                current_vol = record.get(a3, 0)
+                if not isinstance(current_vol, (int, float)):
+                    current_vol = 0
+                vol = float(current_vol)
+            except Exception:
+                vol = 0.0
             actions = actor_actions.get(uid, 0)
             xnn_value = num * w_num + vol * w_vol - actions * w_action
             ranking.append((uid, xnn_value))
