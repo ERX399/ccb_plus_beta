@@ -188,35 +188,35 @@ class ccb(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
-        self.window = config.get("yw_window")
-        self.threshold = config.get("yw_threshold")
-        self.ban_duration = config.get("yw_ban_duration")
+        self.window = max(1, _safe_int(config.get("yw_window"), 60))
+        self.threshold = max(1, _safe_int(config.get("yw_threshold"), 5))
+        self.ban_duration = max(1, _safe_int(config.get("yw_ban_duration"), 180))
         self.action_times = {}
         self.ban_list = {}
-        self.yw_prob = config.get("yw_probability")
-        self.white_list = [str(x) for x in (config.get("white_list") or [])]
+        self.yw_prob = max(0.0, min(1.0, _safe_float(config.get("yw_probability"), 0.1)))
+        self.white_list = [str(x).strip() for x in (config.get("white_list") or []) if str(x).strip()]
         self.group_white_list = config.get("group_white_list", [])
-        self.selfdo = self.config.get("self_ccb", False)
+        self.selfdo = _safe_bool(self.config.get("self_ccb", False), False)
         self._sync_default_white_list()
-        self.crit_prob = self.config.get("crit_prob")
-        self.is_log = self.config.get("is_log")
+        self.crit_prob = max(0.0, min(1.0, _safe_float(self.config.get("crit_prob"), 0.2)))
+        self.is_log = _safe_bool(self.config.get("is_log", False), False)
 
         # 管理员折叠配置（兼容旧版顶层配置）
         admin_settings = config.get("admin_settings", {}) or {}
 
         # 显示设置：新版位于 admin_settings.display_settings；兼容旧版顶层 display_settings
         display_settings = admin_settings.get("display_settings", config.get("display_settings", {}) or {}) or {}
-        self.show_avatar = display_settings.get("show_avatar", config.get("show_avatar", True))
-        self.use_forward_message = display_settings.get("use_forward_message", config.get("use_forward_message", False))
+        self.show_avatar = _safe_bool(display_settings.get("show_avatar", config.get("show_avatar", True)), True)
+        self.use_forward_message = _safe_bool(display_settings.get("use_forward_message", config.get("use_forward_message", False)), False)
         self.forward_node_name = display_settings.get("forward_node_name", "CCB PLUS Beta")
         self.top_limit = min(100, max(1, _safe_int(
             display_settings.get("top_limit", config.get("top_limit", 10)),
             10
         )))
-        self.admin_crit_multiplier_enabled = admin_settings.get(
+        self.admin_crit_multiplier_enabled = _safe_bool(admin_settings.get(
             "crit_multiplier_enabled",
             admin_settings.get("super_crit_enabled", config.get("super_crit_enabled", False))
-        )
+        ), False)
         self.admin_crit_multiplier = _safe_float(
             admin_settings.get(
                 "crit_multiplier",
@@ -225,19 +225,19 @@ class ccb(Star):
             5.0
         )
 
-        self.admin_extra_crit_enabled = admin_settings.get(
+        self.admin_extra_crit_enabled = _safe_bool(admin_settings.get(
             "extra_crit_enabled",
             config.get("admin_extra_crit_enabled", False)
-        )
-        self.admin_extra_crit_bonus = admin_settings.get(
+        ), False)
+        self.admin_extra_crit_bonus = _safe_float(admin_settings.get(
             "extra_crit_bonus",
             config.get("admin_extra_crit_bonus", 0.3)
-        )
+        ), 0.3)
         self.admin_min_volume = max(0.0, _safe_float(
             admin_settings.get("min_volume", config.get("admin_min_volume", 0)),
             0.0
         ))
-        self.admin_exempt_yw = admin_settings.get("exempt_yw", False)
+        self.admin_exempt_yw = _safe_bool(admin_settings.get("exempt_yw", False), False)
 
         # 群聊单独限制配置模块
         self.group_configs = config.get("group_configs", []) or []
