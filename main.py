@@ -55,6 +55,23 @@ def _safe_float(value, default: float = 0.0) -> float:
     return default
 
 
+def _safe_bool(value, default: bool = False) -> bool:
+    """兼容 WebUI 可能传入的 bool / 数字 / 字符串布尔值"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("true", "1", "yes", "y", "on", "启用", "开启"):
+            return True
+        if text in ("false", "0", "no", "n", "off", "禁用", "关闭"):
+            return False
+    return default
+
+
 def _normalize_ccb_by(value) -> dict:
     """把 ccb_by 清洗为 {user_id: {count, first, max}} 格式"""
     if not isinstance(value, dict):
@@ -119,6 +136,8 @@ class DailyGroupLimiter:
 
     def _write(self, data: dict):
         try:
+            data_dir = os.path.dirname(self.file_path) or "."
+            os.makedirs(data_dir, exist_ok=True)
             with open(self.file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -224,35 +243,70 @@ class ccb(Star):
         self.group_configs = config.get("group_configs", []) or []
         self.daily_limiter = DailyGroupLimiter(DAILY_LIMIT_FILE)
 
+    def _group_white_ids(self) -> list[str]:
+        """获取有效群聊白名单，过滤 WebUI 可能产生的空项/空白项。"""
+        return [str(g).strip() for g in (self.group_white_list or []) if str(g).strip()]
+
     def _check_group(self, group_id: str) -> bool:
-        gl = [str(g) for g in self.group_white_list]
+        gl = self._group_white_ids()
         if not gl:
             return True
-        return str(group_id) in gl
+        return str(group_id).strip() in gl
+
+    def _group_block_message(self) -> str:
+        return "本群未开启 CCB 功能，请联系管理员在插件配置的群聊白名单中添加本群。"
 
     def _iter_group_configs(self):
-        """兼容 AstrBot template_list 可能返回的 list/dict 结构"""
+        """兼容 AstrBot template_list 可能返回的 list/dict/嵌套模板结构"""
+        def unwrap(item):
+            if not isinstance(item, dict):
+                return None
+            # 常见结构：{"group_id": "...", "daily_ccb_limit": ...}
+            if "group_id" in item or "daily_ccb_limit" in item:
+                return item
+            # 兼容模板包装：{"group_setting": {...}} / {"items": {...}} / {"value": {...}}
+            for key in ("group_setting", "items", "value", "data", "config"):
+                inner = item.get(key)
+                if isinstance(inner, dict):
+                    result = unwrap(inner)
+                    if result:
+                        return result
+            return None
+
         cfg = self.group_configs or []
         if isinstance(cfg, list):
             for item in cfg:
-                if isinstance(item, dict):
-                    yield item
+                result = unwrap(item)
+                if result:
+                    yield result
         elif isinstance(cfg, dict):
+            # 兼容 group_configs 本身就是直接配置：{"group_id": "...", ...}
+            direct = unwrap(cfg)
+            if direct:
+                yield direct
+
+            # 兼容 {"group_setting": [..]} / {"xxx": {...}} 等结构
             for item in cfg.values():
-                if isinstance(item, dict):
-                    yield item
+                if isinstance(item, list):
+                    for sub_item in item:
+                        result = unwrap(sub_item)
+                        if result and result is not direct:
+                            yield result
+                else:
+                    result = unwrap(item)
+                    if result and result is not direct:
+                        yield result
 
     def _get_group_daily_limit(self, group_id: str) -> int:
         """获取当前群每日 CCB 上限；无匹配配置或未启用则不限制"""
-        gid = str(group_id)
+        gid = str(group_id).strip()
         for item in self._iter_group_configs():
-            if not item.get("enable", True):
+            if not _safe_bool(item.get("enable", True), True):
                 continue
-            if str(item.get("group_id", "")).strip() == gid:
-                try:
-                    return int(item.get("daily_ccb_limit", 0) or 0)
-                except Exception:
-                    return 0
+            item_gid = str(item.get("group_id", "")).strip()
+            if item_gid == gid:
+                limit = _safe_int(item.get("daily_ccb_limit", 0), 0)
+                return max(0, limit)
         return 0
 
     def _normalize_admin_ids(self, value) -> list[str]:
@@ -805,6 +859,7 @@ class ccb(Star):
         """对目标进行 CCB用法：/ccb [@目标]；未 @ 时默认自己"""
         group_id = str(event.get_group_id())
         if not self._check_group(group_id):
+            yield event.plain_result(self._group_block_message())
             return
         self._sync_event_bot_white_list(event)
 
@@ -814,8 +869,14 @@ class ccb(Star):
         now = _time_module.time()
         admin_exempt_yw = bool(self.admin_exempt_yw and await self._is_admin(event))
 
-        daily_limit = self._get_group_daily_limit(group_id)
-        can_use, remain = (True, 0) if admin_exempt_yw else self.daily_limiter.can_use(group_id, send_id, daily_limit)
+        try:
+            daily_limit = self._get_group_daily_limit(group_id)
+            can_use, remain = (True, 0) if admin_exempt_yw else self.daily_limiter.can_use(group_id, send_id, daily_limit)
+        except Exception as e:
+            logger.warning(f"daily limit check error, fallback to unlimited: {e}")
+            daily_limit = 0
+            can_use, remain = True, 0
+
         if not can_use:
             yield event.plain_result(f"你今天在本群的 CCB 次数已达上限（{daily_limit}次），明天再来吧")
             return
@@ -842,10 +903,7 @@ class ccb(Star):
         target_user_id = self._get_target_user_id(event)
 
         if target_user_id in self.white_list:
-            stranger_info = await event.bot.api.call_action(
-                'get_stranger_info', user_id=target_user_id
-            )
-            nickname = stranger_info.get("nick", target_user_id)
+            nickname = await self._get_nickname(event, target_user_id)
             yield event.plain_result(f"{nickname} 的后门受保护，不能ccb😡")
             return
 
@@ -1355,20 +1413,69 @@ class ccb(Star):
             f"• 相关数据已重新校准"
         )
         yield event.plain_result(msg)
-    # ── /ccbnodo (管理员) ────────────────────────────
-    @filter.permission_type(filter.PermissionType.ADMIN)
+    async def _send_ccbnodo_list(self, event: AstrMessageEvent):
+        """查看当前 nodo 保护名单（排除管理员和bot），以合并转发发送。"""
+        admin_ids = set(self._get_admin_ids())
+        try:
+            bot_id = str(event.get_self_id())
+        except Exception:
+            bot_id = ""
+
+        display_list = [uid for uid in self.white_list if uid not in admin_ids and uid != bot_id]
+
+        if not display_list:
+            yield event.plain_result("当前 nodo 保护名单为空（已排除管理员和bot）")
+            return
+
+        lines = []
+        for uid in display_list:
+            nick = await self._get_nickname(event, uid)
+            lines.append(f"{nick}({uid})")
+
+        msg = "🛡️ Nodo 保护名单：\n" + "\n".join(lines)
+
+        if event.get_platform_name() == "aiocqhttp":
+            try:
+                group_id = event.get_group_id()
+                self_id = str(event.get_self_id())
+                await event.bot.api.call_action(
+                    "send_group_forward_msg",
+                    group_id=group_id,
+                    messages=[{
+                        "type": "node",
+                        "data": {
+                            "name": self.forward_node_name,
+                            "uin": self_id,
+                            "content": [{"type": "text", "data": {"text": msg}}]
+                        }
+                    }]
+                )
+                return
+            except Exception as e:
+                logger.warning(f"send nodo list forward message failed, fallback: {e}")
+        yield event.plain_result(msg)
+
+    # ── /ccbnodo (所有人) ────────────────────────────
     @filter.command("ccbnodo")
     async def cmd_ccbnodo(self, event: AstrMessageEvent):
-        """管理员指令：切换目标防被 CCB 状态。用法：/ccbnodo [@目标]；未 @ 时默认自己。"""
-        if not await self._is_admin(event):
-            yield event.plain_result("只有 AstrBot 管理员才能使用此命令")
+        """切换目标防被 CCB 状态。用法：/ccbnodo [@目标] 或 /ccbnodo list；普通用户只能切换自己。"""
+        raw_parts = (event.message_str or "").strip().split()
+        if len(raw_parts) >= 2 and raw_parts[1].lower() == "list":
+            async for result in self._send_ccbnodo_list(event):
+                yield result
             return
 
         target_user_id = self._get_target_user_id(event)
+        sender_id = str(event.get_sender_id())
+        is_admin = await self._is_admin(event)
+
+        if not is_admin and target_user_id != sender_id:
+            yield event.plain_result("非管理员只能切换自己的防CCB保护")
+            return
+
         target_nick = await self._get_nickname(event, target_user_id)
         if target_user_id in self.white_list:
             self.white_list.remove(target_user_id)
-
             self._save_white_list()
             yield event.plain_result(f"已解除 {target_nick} 的防CCB保护，现在可以对其CCB了")
         else:
