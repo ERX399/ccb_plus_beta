@@ -14,6 +14,7 @@ import os
 DATA_FILE = "data/ccb.json"
 LOG_FILE = "data/ccb_log.json"
 DAILY_LIMIT_FILE = "data/ccb_daily_limit.json"
+NODO_FILE = "plugin_data/ccb_plus_beta/ccbnodo.json"
 
 a1 = "id"
 a2 = "num"
@@ -214,10 +215,11 @@ class ccb(Star):
         self.action_times = {}
         self.ban_list = {}
         self.yw_prob = max(0.0, min(1.0, _safe_float(config.get("yw_probability"), 0.1)))
-        self.white_list = [str(x).strip() for x in (config.get("white_list") or []) if str(x).strip()]
+        self.white_list = self._load_white_list()
         self.group_white_list = config.get("group_white_list", [])
         self.selfdo = _safe_bool(self.config.get("self_ccb", False), False)
         self._sync_default_white_list()
+        self._save_white_list()
         self.crit_prob = max(0.0, min(1.0, _safe_float(self.config.get("crit_prob"), 0.2)))
         self.is_log = _safe_bool(self.config.get("is_log", False), False)
 
@@ -641,7 +643,56 @@ class ccb(Star):
             "crit": bool(crit)
         }
 
+    def _nodo_file_path(self) -> str:
+        """返回 ccbnodo 独立持久化文件路径。"""
+        return NODO_FILE
+
+    def _normalize_white_list(self, value) -> list[str]:
+        """把配置/文件中的名单统一清洗成去重字符串列表。"""
+        if isinstance(value, dict):
+            value = value.get("white_list") if "white_list" in value else value.get("data", [])
+        if isinstance(value, (str, int)):
+            value = [value]
+        if not isinstance(value, (list, tuple, set)):
+            value = []
+
+        result = []
+        for item in value:
+            uid = str(item).strip()
+            if uid and uid not in result:
+                result.append(uid)
+        return result
+
+    def _load_white_list(self) -> list[str]:
+        """优先从 plugin_data/ccb_plus_beta/ccbnodo.json 读取名单；文件不存在时兼容旧配置。"""
+        file_path = self._nodo_file_path()
+        try:
+            if os.path.exists(file_path):
+                with open(file_path, "r", encoding="utf-8") as f:
+                    return self._normalize_white_list(json.load(f))
+        except Exception as e:
+            logger.warning(f"load ccbnodo file error: {e}")
+
+        try:
+            return self._normalize_white_list(self.config.get("white_list") or [])
+        except Exception as e:
+            logger.warning(f"load ccbnodo config fallback error: {e}")
+            return []
+
     def _save_white_list(self):
+        """保存 nodo 保护名单到独立文件，并同步旧配置项以兼容面板显示。"""
+        self.white_list = self._normalize_white_list(self.white_list)
+
+        try:
+            file_path = self._nodo_file_path()
+            os.makedirs(os.path.dirname(file_path) or ".", exist_ok=True)
+            tmp_path = f"{file_path}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self.white_list, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, file_path)
+        except Exception as e:
+            logger.warning(f"save ccbnodo file error: {e}")
+
         try:
             self.config["white_list"] = self.white_list
             self.config.save()
@@ -907,255 +958,260 @@ class ccb(Star):
                 yield event.plain_result(f"你今天在本群的 CCB 次数已达上限（{daily_limit}次），明天再来吧")
                 return
 
-        ban_end = self.ban_list.get(actor_id, 0)
-        if now < ban_end and not admin_exempt_yw:
-            remain = int(ban_end - now)
-            m, s = divmod(remain, 60)
-            yield event.plain_result(f"嘻嘻，你已经一滴不剩了，养胃还剩 {m}分{s}秒")
-            return
-
-        if not admin_exempt_yw:
-            times = self.action_times.setdefault(actor_id, deque())
-            while times and now - times[0] > self.window:
-                times.popleft()
-            times.append(now)
-
-            if len(times) > self.threshold:
-                self.ban_list[actor_id] = now + self.ban_duration
-                times.clear()
-                yield event.plain_result("冲得出来吗你就冲，再冲就给你折了")
+            ban_end = self.ban_list.get(actor_id, 0)
+            if now < ban_end and not admin_exempt_yw:
+                remain = int(ban_end - now)
+                m, s = divmod(remain, 60)
+                yield event.plain_result(f"嘻嘻，你已经一滴不剩了，养胃还剩 {m}分{s}秒")
                 return
 
-        target_user_id = self._get_target_user_id(event)
+            if not admin_exempt_yw:
+                times = self.action_times.setdefault(actor_id, deque())
+                while times and now - times[0] > self.window:
+                    times.popleft()
+                times.append(now)
 
-        if target_user_id in self.white_list:
-            nickname = await self._get_nickname(event, target_user_id)
-            yield event.plain_result(f"{nickname} 的后门受保护，不能ccb😡")
-            return
+                if len(times) > self.threshold:
+                    self.ban_list[actor_id] = now + self.ban_duration
+                    times.clear()
+                    yield event.plain_result("冲得出来吗你就冲，再冲就给你折了")
+                    return
 
-        if target_user_id == actor_id and not self.selfdo:
-            yield event.plain_result("兄啊金箔怎么还能捅到自己的啊（恼")
-            return
+            target_user_id = self._get_target_user_id(event)
 
-        duration = round(_random_module.uniform(1, 60), 2)
-        V = round(_random_module.uniform(1, 100), 2)
-        crit = False
-        is_log = self.is_log
-        is_admin_actor = await self._is_admin(event)
-        crit_prob = float(self.crit_prob or 0)
-        if self.admin_extra_crit_enabled and is_admin_actor:
-            crit_prob += float(self.admin_extra_crit_bonus or 0)
-        crit_prob = max(0.0, min(1.0, crit_prob))
+            if target_user_id in self.white_list:
+                nickname = await self._get_nickname(event, target_user_id)
+                yield event.plain_result(f"{nickname} 的后门受保护，不能ccb😡")
+                return
 
-        if _random_module.random() < crit_prob:
-            mult = 2.0
-            if self.admin_crit_multiplier_enabled and is_admin_actor:
-                mult = self.admin_crit_multiplier
+            if target_user_id == actor_id and not self.selfdo:
+                yield event.plain_result("兄啊金箔怎么还能捅到自己的啊（恼")
+                return
 
-            V = round(V * mult, 2)
-            crit = True
+            duration = round(_random_module.uniform(1, 60), 2)
+            V = round(_random_module.uniform(1, 100), 2)
+            crit = False
+            is_log = self.is_log
+            is_admin_actor = await self._is_admin(event)
+            crit_prob = float(self.crit_prob or 0)
+            if self.admin_extra_crit_enabled and is_admin_actor:
+                crit_prob += float(self.admin_extra_crit_bonus or 0)
+            crit_prob = max(0.0, min(1.0, crit_prob))
 
-        if is_admin_actor and self.admin_min_volume > 0:
-            V = round(max(V, self.admin_min_volume), 2)
+            if _random_module.random() < crit_prob:
+                mult = 2.0
+                if self.admin_crit_multiplier_enabled and is_admin_actor:
+                    mult = self.admin_crit_multiplier
 
-        pic = get_avatar(target_user_id)
+                V = round(V * mult, 2)
+                crit = True
+
+            if is_admin_actor and self.admin_min_volume > 0:
+                V = round(max(V, self.admin_min_volume), 2)
+
+            pic = get_avatar(target_user_id)
 
 
-        all_data = self.read_data()
-        if not isinstance(all_data, dict):
-            all_data = {}
+            all_data = self.read_data()
+            if not isinstance(all_data, dict):
+                all_data = {}
 
-        group_data = all_data.get(group_id, [])
-        if not group_data:
-            try:
-                group_data = all_data.get(int(group_id), [])
-            except (ValueError, TypeError):
-                pass
-        group_data = _normalize_group_data(group_data)
-        all_data[group_id] = group_data
+            group_data = all_data.get(group_id, [])
+            if not group_data:
+                try:
+                    group_data = all_data.get(int(group_id), [])
+                except (ValueError, TypeError):
+                    pass
+            group_data = _normalize_group_data(group_data)
+            all_data[group_id] = group_data
 
-        mode = makeit(group_data, target_user_id)
-        if mode == 1:
-            try:
-                for item in group_data:
-                    if item.get(a1) == target_user_id:
-                        nickname = target_user_id
-                        if event.get_platform_name() == "aiocqhttp":
-                            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-                            assert isinstance(event, AiocqhttpMessageEvent)
-                            stranger_info = await event.bot.api.call_action(
-                                'get_stranger_info', user_id=target_user_id
-                            )
-                            nickname = stranger_info.get("nick", nickname)
+            mode = makeit(group_data, target_user_id)
+            if mode == 1:
+                try:
+                    for item in group_data:
+                        if item.get(a1) == target_user_id:
+                            nickname = target_user_id
+                            if event.get_platform_name() == "aiocqhttp":
+                                from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+                                assert isinstance(event, AiocqhttpMessageEvent)
+                                stranger_info = await event.bot.api.call_action(
+                                    'get_stranger_info', user_id=target_user_id
+                                )
+                                nickname = stranger_info.get("nick", nickname)
 
-                        try:
-                            current_num = item.get(a2, 0)
-                            if not isinstance(current_num, (int, float)):
-                                current_num = 0
-                            item[a2] = int(current_num) + 1
-                        except Exception:
-                            item[a2] = 1
-                        
-                        try:
-                            current_vol = item.get(a3, 0)
-                            if not isinstance(current_vol, (int, float)):
-                                current_vol = 0
-                            item[a3] = round(float(current_vol) + V, 2)
-                        except Exception:
-                            item[a3] = round(V, 2)
-
-                        ccb_by = _normalize_ccb_by(item.get(a4, {}))
-                        executor_info = ccb_by.get(send_id)
-                        if isinstance(executor_info, dict):
-                            executor_info["count"] = _safe_int(executor_info.get("count", 0), 0) + 1
-                            executor_info["first"] = bool(executor_info.get("first", False))
-                            executor_info["max"] = bool(executor_info.get("max", False))
-                            ccb_by[send_id] = executor_info
-                        else:
-                            ccb_by[send_id] = {"count": 1, "first": False, "max": False}
-
-                        raw_prev = item.get(a5, None)
-                        prev_max = 0.0
-                        if raw_prev is not None:
                             try:
-                                prev_max = float(raw_prev)
-                            except (TypeError, ValueError):
-                                prev_max = 0.0
-                        if prev_max == 0.0:
-                            try:
-                                current_vol = item.get(a3, 0)
                                 current_num = item.get(a2, 0)
-                                
-                                if not isinstance(current_vol, (int, float)):
-                                    current_vol = 0
                                 if not isinstance(current_num, (int, float)):
                                     current_num = 0
-                                
-                                total_vol = float(current_vol)
-                                total_num = int(current_num)
-                                
-                                if total_num > 0:
-                                    prev_max = round(total_vol / total_num, 2)
-                                else:
-                                    prev_max = 0.0
+                                item[a2] = int(current_num) + 1
                             except Exception:
-                                prev_max = 0.0
-
-                        if float(V) > prev_max:
-                            item[a5] = round(float(V), 2)
-                            for k in list(ccb_by.keys()):
-                                if not isinstance(ccb_by.get(k), dict):
-                                    ccb_by[k] = {"count": _safe_int(ccb_by.get(k), 0), "first": False, "max": False}
-                                ccb_by[k]["max"] = False
-                            ccb_by.setdefault(send_id, {"count": 1, "first": False, "max": False})
-                            ccb_by[send_id]["max"] = True
-                        else:
-                            for k in list(ccb_by.keys()):
-                                if not isinstance(ccb_by.get(k), dict):
-                                    ccb_by[k] = {"count": _safe_int(ccb_by.get(k), 0), "first": False, "max": False}
-                                if "max" not in ccb_by[k]:
-                                    ccb_by[k]["max"] = False
-
-                        item[a4] = ccb_by
-
-                        crit_text = "💥 暴击！"
-
-                        if crit:
-                            texts = [
-                                f"你和{nickname}发生了{duration}min长的ccb行为，向ta注入了 {crit_text}{V:.2f}ml的生命因子",
-                                f"这是ta的第{item[a2]}次"
-                            ]
-                        else:
-                            texts = [
-                                f"你和{nickname}发生了{duration}min长的ccb行为，向ta注入了{V:.2f}ml的生命因子",
-                                f"这是ta的第{item[a2]}次"
-                            ]
-                        async for result in self._send_ccb_result(event, texts, pic):
-                            yield result
-
-                        if is_log:
+                                item[a2] = 1
+                        
                             try:
-                                self.append_log(
-                                    group_id,
-                                    send_id,
-                                    target_user_id,
-                                    duration,
-                                    V,
-                                    self._build_log_extra(group_data, target_user_id, send_id, crit)
-                                )
-                            except Exception as e:
-                                logger.warning(f"log error: {e}")
+                                current_vol = item.get(a3, 0)
+                                if not isinstance(current_vol, (int, float)):
+                                    current_vol = 0
+                                item[a3] = round(float(current_vol) + V, 2)
+                            except Exception:
+                                item[a3] = round(V, 2)
 
-                        all_data[group_id] = group_data
-                        self.write_data(all_data)
-                        self.daily_limiter.increase(group_id, send_id, daily_limit)
+                            ccb_by = _normalize_ccb_by(item.get(a4, {}))
+                            executor_info = ccb_by.get(send_id)
+                            if isinstance(executor_info, dict):
+                                executor_info["count"] = _safe_int(executor_info.get("count", 0), 0) + 1
+                                executor_info["first"] = bool(executor_info.get("first", False))
+                                executor_info["max"] = bool(executor_info.get("max", False))
+                                ccb_by[send_id] = executor_info
+                            else:
+                                ccb_by[send_id] = {"count": 1, "first": False, "max": False}
 
-                        if (not admin_exempt_yw) and _random_module.random() < self.yw_prob:
-                            self.ban_list[actor_id] = now + self.ban_duration
-                            yield event.plain_result("💥你的牛牛炸膛了！满身疮痍，再起不能（悲")
-                        return
-            except Exception as e:
-                logger.error(f"error: {e}")
-                yield event.plain_result("对方拒绝了和你ccb")
-                return
+                            raw_prev = item.get(a5, None)
+                            prev_max = 0.0
+                            if raw_prev is not None:
+                                try:
+                                    prev_max = float(raw_prev)
+                                except (TypeError, ValueError):
+                                    prev_max = 0.0
+                            if prev_max == 0.0:
+                                try:
+                                    current_vol = item.get(a3, 0)
+                                    current_num = item.get(a2, 0)
+                                
+                                    if not isinstance(current_vol, (int, float)):
+                                        current_vol = 0
+                                    if not isinstance(current_num, (int, float)):
+                                        current_num = 0
+                                
+                                    total_vol = float(current_vol)
+                                    total_num = int(current_num)
+                                
+                                    if total_num > 0:
+                                        prev_max = round(total_vol / total_num, 2)
+                                    else:
+                                        prev_max = 0.0
+                                except Exception:
+                                    prev_max = 0.0
 
-        else:
-            try:
-                nickname = target_user_id
-                if event.get_platform_name() == "aiocqhttp":
-                    from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-                    assert isinstance(event, AiocqhttpMessageEvent)
-                    stranger_info = await event.bot.api.call_action(
-                        'get_stranger_info', user_id=target_user_id
-                    )
-                    nickname = stranger_info.get("nick", nickname)
+                            if float(V) > prev_max:
+                                item[a5] = round(float(V), 2)
+                                for k in list(ccb_by.keys()):
+                                    if not isinstance(ccb_by.get(k), dict):
+                                        ccb_by[k] = {"count": _safe_int(ccb_by.get(k), 0), "first": False, "max": False}
+                                    ccb_by[k]["max"] = False
+                                ccb_by.setdefault(send_id, {"count": 1, "first": False, "max": False})
+                                ccb_by[send_id]["max"] = True
+                            else:
+                                for k in list(ccb_by.keys()):
+                                    if not isinstance(ccb_by.get(k), dict):
+                                        ccb_by[k] = {"count": _safe_int(ccb_by.get(k), 0), "first": False, "max": False}
+                                    if "max" not in ccb_by[k]:
+                                        ccb_by[k]["max"] = False
 
-                if crit:
-                    texts = [
-                        f"你和{nickname}发生了{duration}min长的ccb行为，向ta注入了 💥 暴击！{V:.2f}ml的生命因子",
-                        "这是ta的初体验"
-                    ]
-                else:
-                    texts = [
-                        f"你和{nickname}发生了{duration}min长的ccb行为，向ta注入了{V:.2f}ml的生命因子",
-                        "这是ta的初体验"
-                    ]
-                async for result in self._send_ccb_result(event, texts, pic):
-                    yield result
+                            item[a4] = ccb_by
 
-                new_record = {
-                    a1: target_user_id,
-                    a2: 1,
-                    a3: round(V, 2),
-                    a4: {send_id: {"count": 1, "first": True, "max": True}},
-                    a5: round(V, 2)
-                }
-                group_data.append(new_record)
-                all_data[group_id] = group_data
-                self.write_data(all_data)
-                self.daily_limiter.increase(group_id, send_id, daily_limit)
+                            crit_text = "💥 暴击！"
 
-                if is_log:
-                    try:
-                        self.append_log(
-                            group_id,
-                            send_id,
-                            target_user_id,
-                            duration,
-                            V,
-                            self._build_log_extra(group_data, target_user_id, send_id, crit)
+                            if crit:
+                                texts = [
+                                    f"你和{nickname}发生了{duration}min长的ccb行为，向ta注入了 {crit_text}{V:.2f}ml的生命因子",
+                                    f"这是ta的第{item[a2]}次"
+                                ]
+                            else:
+                                texts = [
+                                    f"你和{nickname}发生了{duration}min长的ccb行为，向ta注入了{V:.2f}ml的生命因子",
+                                    f"这是ta的第{item[a2]}次"
+                                ]
+                            async for result in self._send_ccb_result(event, texts, pic):
+                                yield result
+
+                            if is_log:
+                                try:
+                                    self.append_log(
+                                        group_id,
+                                        send_id,
+                                        target_user_id,
+                                        duration,
+                                        V,
+                                        self._build_log_extra(group_data, target_user_id, send_id, crit)
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"log error: {e}")
+
+                            all_data[group_id] = group_data
+                            self.write_data(all_data)
+                            self.daily_limiter.increase(group_id, send_id, daily_limit)
+
+                            if (not admin_exempt_yw) and _random_module.random() < self.yw_prob:
+                                self.ban_list[actor_id] = now + self.ban_duration
+                                yield event.plain_result("💥你的牛牛炸膛了！满身疮痍，再起不能（悲")
+                            return
+                except Exception as e:
+                    logger.error(f"error: {e}")
+                    yield event.plain_result("对方拒绝了和你ccb")
+                    return
+
+            else:
+                try:
+                    nickname = target_user_id
+                    if event.get_platform_name() == "aiocqhttp":
+                        from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+                        assert isinstance(event, AiocqhttpMessageEvent)
+                        stranger_info = await event.bot.api.call_action(
+                            'get_stranger_info', user_id=target_user_id
                         )
-                    except Exception as e:
-                        logger.warning(f"log error: {e}")
+                        nickname = stranger_info.get("nick", nickname)
 
-                if (not admin_exempt_yw) and _random_module.random() < self.yw_prob:
-                    self.ban_list[actor_id] = now + self.ban_duration
-                    yield event.plain_result("💥你的牛牛炸膛了！满身疮痍，再起不能（悲")
-                return
-            except Exception as e:
-                logger.error(f"error: {e}")
-                yield event.plain_result("对方拒绝了和你ccb")
-                return
+                    if crit:
+                        texts = [
+                            f"你和{nickname}发生了{duration}min长的ccb行为，向ta注入了 💥 暴击！{V:.2f}ml的生命因子",
+                            "这是ta的初体验"
+                        ]
+                    else:
+                        texts = [
+                            f"你和{nickname}发生了{duration}min长的ccb行为，向ta注入了{V:.2f}ml的生命因子",
+                            "这是ta的初体验"
+                        ]
+                    async for result in self._send_ccb_result(event, texts, pic):
+                        yield result
+
+                    new_record = {
+                        a1: target_user_id,
+                        a2: 1,
+                        a3: round(V, 2),
+                        a4: {send_id: {"count": 1, "first": True, "max": True}},
+                        a5: round(V, 2)
+                    }
+                    group_data.append(new_record)
+                    all_data[group_id] = group_data
+                    self.write_data(all_data)
+                    self.daily_limiter.increase(group_id, send_id, daily_limit)
+
+                    if is_log:
+                        try:
+                            self.append_log(
+                                group_id,
+                                send_id,
+                                target_user_id,
+                                duration,
+                                V,
+                                self._build_log_extra(group_data, target_user_id, send_id, crit)
+                            )
+                        except Exception as e:
+                            logger.warning(f"log error: {e}")
+
+                    if (not admin_exempt_yw) and _random_module.random() < self.yw_prob:
+                        self.ban_list[actor_id] = now + self.ban_duration
+                        yield event.plain_result("💥你的牛牛炸膛了！满身疮痍，再起不能（悲")
+                    return
+                except Exception as e:
+                    logger.error(f"error: {e}")
+                    yield event.plain_result("对方拒绝了和你ccb")
+                    return
+
+        except Exception as e:
+            logger.error(f"error: {e}")
+            yield event.plain_result("对方拒绝了和你ccb")
+            return
 
 
 
