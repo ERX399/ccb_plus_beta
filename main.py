@@ -14,7 +14,7 @@ import os
 DATA_FILE = "data/ccb.json"
 LOG_FILE = "data/ccb_log.json"
 DAILY_LIMIT_FILE = "data/ccb_daily_limit.json"
-NODO_FILE = "plugin_data/ccb_plus_beta/ccbnodo.json"
+NODO_FILE = "data/plugin_data/ccb_plus_beta/ccbnodo.json"
 
 a1 = "id"
 a2 = "num"
