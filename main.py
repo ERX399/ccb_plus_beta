@@ -265,6 +265,39 @@ class ccb(Star):
         self.group_configs = config.get("group_configs", []) or []
         self.daily_limiter = DailyGroupLimiter(DAILY_LIMIT_FILE)
 
+    def _try_consume_event(self, event) -> bool:
+        """尽量阻止事件继续流向后续链路（兼容不同 AstrBot 版本）。"""
+        for name in ("stop_event", "stop_propagation", "prevent_default", "set_handled", "mark_handled", "consume"):
+            fn = getattr(event, name, None)
+            if callable(fn):
+                try:
+                    fn()
+                    return True
+                except Exception:
+                    pass
+
+        for attr in ("handled", "is_handled", "consumed", "blocked"):
+            try:
+                if hasattr(event, attr):
+                    setattr(event, attr, True)
+            except Exception:
+                pass
+
+        try:
+            msg = getattr(event, "message", None)
+            if msg is not None:
+                for attr in ("handled", "consumed", "blocked"):
+                    try:
+                        if hasattr(msg, attr):
+                            setattr(msg, attr, True)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        return False
+
+
     def _group_white_ids(self) -> list[str]:
         """获取有效群聊白名单，过滤 WebUI 可能产生的空项/空白项。"""
         return [str(g).strip() for g in (self.group_white_list or []) if str(g).strip()]
@@ -928,6 +961,7 @@ class ccb(Star):
     @filter.command("ccb")
     async def cmd_ccb(self, event: AstrMessageEvent):
         """对目标进行 CCB用法：/ccb [@目标]；未 @ 时默认自己"""
+        self._try_consume_event(event)
         try:
             group_id = str(event.get_group_id())
             if not self._check_group(group_id):
@@ -1220,6 +1254,7 @@ class ccb(Star):
     @filter.command("ccbtop")
     async def cmd_ccbtop(self, event: AstrMessageEvent):
         """查看当前群被 CCB 次数排行榜用法：/ccbtop [数量]，数量上限100"""
+        self._try_consume_event(event)
 
         group_id = str(event.get_group_id())
         if not self._check_group(group_id):
@@ -1238,6 +1273,7 @@ class ccb(Star):
     @filter.command("ccbvol")
     async def cmd_ccbvol(self, event: AstrMessageEvent):
         """查看当前群累计注入量排行榜用法：/ccbvol [数量]，数量上限100"""
+        self._try_consume_event(event)
 
         group_id = str(event.get_group_id())
         if not self._check_group(group_id):
@@ -1256,6 +1292,7 @@ class ccb(Star):
     @filter.command("ccbinfo")
     async def cmd_ccbinfo(self, event: AstrMessageEvent):
         """查询某人的 CCB 统计信息用法：/ccbinfo [@目标]；未 @ 时查询自己"""
+        self._try_consume_event(event)
         group_id = str(event.get_group_id())
         if not self._check_group(group_id):
             return
@@ -1347,6 +1384,7 @@ class ccb(Star):
     @filter.command("ccbmax")
     async def cmd_ccbmax(self, event: AstrMessageEvent):
         """查看当前群单次最大注入排行榜用法：/ccbmax [数量]，数量上限100"""
+        self._try_consume_event(event)
 
         group_id = str(event.get_group_id())
         if not self._check_group(group_id):
@@ -1366,6 +1404,7 @@ class ccb(Star):
     @filter.command("xnn")
     async def cmd_xnn(self, event: AstrMessageEvent):
         """查看当前群小南梁排行榜用法：/xnn [数量]，数量上限100"""
+        self._try_consume_event(event)
         group_id = str(event.get_group_id())
         if not self._check_group(group_id):
             return
@@ -1384,6 +1423,7 @@ class ccb(Star):
     @filter.command("ccbtop-all")
     async def cmd_ccbtop_all(self, event: AstrMessageEvent):
         """查看全部群日志汇总的被 CCB 次数排行榜用法：/ccbtop-all [数量]，数量上限100"""
+        self._try_consume_event(event)
         group_data, _, group_count = self._build_all_log_records()
         if not group_data:
             yield event.plain_result("暂无完整日志记录，无法汇总全部群数据")
@@ -1396,6 +1436,7 @@ class ccb(Star):
     @filter.command("ccbvol-all")
     async def cmd_ccbvol_all(self, event: AstrMessageEvent):
         """查看全部群日志汇总的累计注入量排行榜用法：/ccbvol-all [数量]，数量上限100"""
+        self._try_consume_event(event)
         group_data, _, group_count = self._build_all_log_records()
         if not group_data:
             yield event.plain_result("暂无完整日志记录，无法汇总全部群数据")
@@ -1408,6 +1449,7 @@ class ccb(Star):
     @filter.command("ccbmax-all")
     async def cmd_ccbmax_all(self, event: AstrMessageEvent):
         """查看全部群日志汇总的单次最大注入排行榜用法：/ccbmax-all [数量]，数量上限100"""
+        self._try_consume_event(event)
         group_data, _, group_count = self._build_all_log_records()
         if not group_data:
             yield event.plain_result("暂无完整日志记录，无法汇总全部群数据")
@@ -1420,6 +1462,7 @@ class ccb(Star):
     @filter.command("xnn-all")
     async def cmd_xnn_all(self, event: AstrMessageEvent):
         """查看全部群日志汇总的小南梁排行榜用法：/xnn-all [数量]，数量上限100"""
+        self._try_consume_event(event)
         group_data, actor_actions, group_count = self._build_all_log_records()
         if not group_data:
             yield event.plain_result("暂无完整日志记录，无法汇总全部群数据")
@@ -1434,6 +1477,7 @@ class ccb(Star):
     @filter.command("ccbclear")
     async def cmd_ccbclear(self, event: AstrMessageEvent):
         """管理员指令：清除目标的被 CCB 与 CCB 他人记录。用法：/ccbclear [@目标]；未 @ 时默认自己。"""
+        self._try_consume_event(event)
         if not await self._is_admin(event):
             yield event.plain_result("只有 AstrBot 管理员才能使用此命令")
             return
@@ -1541,6 +1585,7 @@ class ccb(Star):
     @filter.command("ccbnodo")
     async def cmd_ccbnodo(self, event: AstrMessageEvent):
         """切换目标防被 CCB 状态。用法：/ccbnodo [@目标] 或 /ccbnodo list；普通用户只能切换自己。"""
+        self._try_consume_event(event)
         raw_parts = (event.message_str or "").strip().split()
         if len(raw_parts) >= 2 and raw_parts[1].lower() == "list":
             async for result in self._send_ccbnodo_list(event):
