@@ -754,13 +754,45 @@ class ccb(Star):
             pass
 
     def _get_target_user_id(self, event: AstrMessageEvent) -> str:
-        """解析命令目标：优先取第一个非机器人 @，未 @ 时默认发送者"""
+        """解析命令目标。
+
+        - 有非机器人 @：返回第一个非机器人 @ 的 QQ。
+        - 只 @ 了机器人：返回机器人自身 ID，交给 white_list 保护逻辑拦截。
+        - 没有 @：返回发送者，用于 /ccb 无目标时的 0721/self_ccb 判断。
+
+        之前这里会跳过 @机器人 后直接回退发送者，导致 /ccb @机器人 或部分 @ 解析异常时变成对自己 CCB。
+        """
+        at_ids = self._get_at_user_ids(event)
         self_id = str(event.get_self_id())
-        return next(
-            (str(seg.qq) for seg in event.get_messages()
-             if isinstance(seg, Comp.At) and str(seg.qq) != self_id),
-            str(event.get_sender_id())
-        )
+        sender_id = str(event.get_sender_id())
+
+        for qq in at_ids:
+            if qq != self_id:
+                return qq
+        if at_ids:
+            return self_id
+        return sender_id
+
+    def _get_at_user_ids(self, event: AstrMessageEvent) -> list[str]:
+        """提取消息里的 @ QQ 列表。"""
+        result: list[str] = []
+        try:
+            for seg in event.get_messages():
+                if isinstance(seg, Comp.At):
+                    qq = str(getattr(seg, "qq", "")).strip()
+                    if qq and qq.lower() != "all":
+                        result.append(qq)
+        except Exception:
+            pass
+        return result
+
+    def _command_has_extra_args(self, event: AstrMessageEvent) -> bool:
+        """判断命令后是否带了额外参数/文本。用于避免 /ccb @目标 解析失败时误回退成 0721。"""
+        try:
+            parts = (event.message_str or "").strip().split(maxsplit=1)
+            return len(parts) >= 2 and bool(parts[1].strip())
+        except Exception:
+            return False
     async def _get_nickname(self, event: AstrMessageEvent, user_id: str) -> str:
         """获取用户昵称；获取失败时回退为 QQ 号"""
         nickname = str(user_id)
@@ -1012,12 +1044,17 @@ class ccb(Star):
                     return
 
             target_user_id = self._get_target_user_id(event)
+            has_at = bool(self._get_at_user_ids(event))
+            has_extra_args = self._command_has_extra_args(event)
 
-            # 先处理 0721/自我 CCB 逻辑：未 @ 时目标就是自己。
-            # 如果把 ccbnodo 白名单判断放在前面，开启 self_ccb 后仍会被自己的保护名单拦截，导致 0721 永远执行不到。
+            # /ccb 带了额外内容但没有识别到有效 @ 时，不允许误回退成 0721。
+            # 纯 /ccb 无目标时才按 self_ccb 判断是否允许 0721。
             if target_user_id == actor_id:
+                if has_extra_args and not has_at:
+                    yield event.plain_result("兄啊金箔怎么还能捅到自己的啊（恼）")
+                    return
                 if not self.selfdo:
-                    yield event.plain_result("兄啊金箔怎么还能捅到自己的啊（恼")
+                    yield event.plain_result("兄啊金箔怎么还能捅到自己的啊（恼）")
                     return
             elif target_user_id in self.white_list:
                 nickname = await self._get_nickname(event, target_user_id)
@@ -1299,7 +1336,6 @@ class ccb(Star):
         if not self._check_group(group_id):
             return
 
-        self_id = str(event.get_self_id())
         target_user_id = self._get_target_user_id(event)
 
         group_data, _ = self._get_group_records(group_id)
@@ -1481,10 +1517,10 @@ class ccb(Star):
         """管理员指令：清除目标的被 CCB 与 CCB 他人记录。用法：/ccbclear [@目标]；未 @ 时默认自己。"""
         self._try_consume_event(event)
         if not await self._is_admin(event):
-            yield event.plain_result("只有 AstrBot 管理员才能使用此命令")
             return
 
         group_id = str(event.get_group_id())
+
         target_user_id = self._get_target_user_id(event)
         target_nick = await self._get_nickname(event, target_user_id)
 
