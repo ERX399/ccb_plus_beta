@@ -1013,13 +1013,15 @@ class ccb(Star):
 
             target_user_id = self._get_target_user_id(event)
 
-            if target_user_id in self.white_list:
+            # 先处理 0721/自我 CCB 逻辑：未 @ 时目标就是自己。
+            # 如果把 ccbnodo 白名单判断放在前面，开启 self_ccb 后仍会被自己的保护名单拦截，导致 0721 永远执行不到。
+            if target_user_id == actor_id:
+                if not self.selfdo:
+                    yield event.plain_result("兄啊金箔怎么还能捅到自己的啊（恼")
+                    return
+            elif target_user_id in self.white_list:
                 nickname = await self._get_nickname(event, target_user_id)
                 yield event.plain_result(f"{nickname} 的后门受保护，不能ccb😡")
-                return
-
-            if target_user_id == actor_id and not self.selfdo:
-                yield event.plain_result("兄啊金箔怎么还能捅到自己的啊（恼")
                 return
 
             duration = round(_random_module.uniform(1, 60), 2)
